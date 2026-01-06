@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 import requests
 from datetime import datetime
 from bs4 import BeautifulSoup
+from typing import Optional, Dict, List
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -39,6 +40,193 @@ def api_get(path: str, params: dict | None = None):
         return None, "Not found (404)"
     else:
         return None, f"API error {resp.status_code}: {resp.text}"
+
+
+def parse_quick_stats_from_soup(soup: BeautifulSoup) -> Optional[Dict]:
+    """Try to find and parse a Quick Stats table from the team page soup.
+    Returns a dict with keys: 'categories': List[str], 'rows': Dict[label, List[str]]
+    or None if no suitable table found.
+    """
+    from bs4 import Tag
+
+    # Helper to parse classic <table> elements
+    def parse_table(t):
+        headers = [th.get_text(strip=True) for th in t.find_all("th")]
+        if headers:
+            if len(headers) > 1 and (headers[0].strip() == "" or any(x.lower() in headers[0].lower() for x in ("best", "rank", "label"))):
+                categories = headers[1:]
+            else:
+                categories = headers
+        else:
+            first_tr = t.find("tr")
+            if first_tr:
+                cells = first_tr.find_all(["td", "th"]) or []
+                categories = [c.get_text(strip=True) for c in cells[1:]] if len(cells) > 1 else []
+            else:
+                categories = []
+
+        rows_local: Dict[str, List[str]] = {}
+        for tr in t.find_all("tr"):
+            cells = tr.find_all(["td", "th"])
+            if not cells:
+                continue
+            texts = [c.get_text(" ", strip=True) for c in cells]
+            if len(texts) == 1:
+                continue
+            label = texts[0]
+            vals = texts[1:]
+            rows_local[label] = vals
+
+        return {"categories": categories, "rows": rows_local}
+
+    # Helper to parse div-based grid tables (the site uses a grid of divs in some themes)
+    def parse_div_grid(container):
+        # collect direct child divs (preserve order)
+        children = [c for c in container.find_all(recursive=False) if isinstance(c, Tag) and c.name == "div"]
+        if not children:
+            # fallback to any descendant divs
+            children = [c for c in container.find_all("div")]
+
+        # find headers
+        headers = []
+        for c in children:
+            classes = c.get("class") or []
+            if any("header" == cls or "header" in cls for cls in classes):
+                text = c.get_text(" ", strip=True)
+                headers.append(text)
+
+        # If no header elements, try to find the first sequence of divs that look like headers
+        if not headers:
+            # try the first row-like group: look for multiple children with no 'val' class
+            guess = []
+            for c in children[:10]:
+                t = c.get_text(" ", strip=True)
+                guess.append(t)
+            if guess:
+                headers = guess
+
+        # categories usually start after an initial empty row-label header
+        categories = headers[1:] if len(headers) > 1 else headers
+
+        rows_local: Dict[str, List[str]] = {}
+
+        i = 0
+        n = len(children)
+        while i < n:
+            c = children[i]
+            classes = c.get("class") or []
+            # row label
+            if any("row-label" == cls or "row-label" in cls for cls in classes):
+                label = c.get_text(" ", strip=True)
+                vals = []
+                j = i + 1
+                # collect following 'val' elements until next 'row-label' or end
+                while j < n:
+                    cj = children[j]
+                    classes_j = cj.get("class") or []
+                    if any("row-label" == cls or "row-label" in cls for cls in classes_j):
+                        break
+                    if any("val" == cls or "val" in cls for cls in classes_j):
+                        vals.append(cj.get_text(" ", strip=True))
+                    j += 1
+                rows_local[label] = vals
+                i = j
+            else:
+                i += 1
+
+        if not rows_local and headers:
+            # fallback: try to chunk children into rows based on header length
+            # assume first header is a placeholder, header count -> cols
+            col_count = max(1, len(categories))
+            # scan for any text nodes that might be row labels
+            text_children = [c.get_text(" ", strip=True) for c in children if c.get_text(strip=True) != ""]
+            if text_children:
+                # chunk after the first header texts
+                # skip header_count items then group
+                try:
+                    start = len(headers)
+                    tail = text_children[start:]
+                    for idx in range(0, len(tail), col_count + 1):
+                        label = tail[idx]
+                        vals = tail[idx+1: idx+1+col_count]
+                        rows_local[label] = vals
+                except Exception:
+                    pass
+
+        if not categories and rows_local:
+            maxlen = max((len(v) for v in rows_local.values()), default=0)
+            categories = [f"Col {i+1}" for i in range(maxlen)]
+
+        if not rows_local:
+            return None
+
+        return {"categories": categories, "rows": rows_local}
+
+    # 1) Try to find a heading containing "Quick Stats" and prefer a following div-based grid
+    heading = soup.find(lambda tag: tag.name in ("h1", "h2", "h3", "h4", "h5", "div", "span") and tag.get_text(strip=True) and "quick stats" in tag.get_text(strip=True).lower())
+    if heading:
+        # try div-grid first
+        div_grid = heading.find_next(lambda tag: tag.name == "div" and tag.get("class") and any("table" in cls or "table" == cls for cls in tag.get("class")))
+        if div_grid:
+            parsed = parse_div_grid(div_grid)
+            if parsed:
+                keys_joined = " ".join(k.lower() for k in parsed.get("rows", {}).keys())
+                if any(k in keys_joined for k in ("best", "opr", "rank", "percentile")):
+                    return parsed
+                # return parsed anyway as it is likely the Quick Stats area
+                return parsed
+
+        # fallback: try a following <table>
+        t = heading.find_next("table")
+        if t:
+            parsed = parse_table(t)
+            keys_joined = " ".join(k.lower() for k in parsed.get("rows", {}).keys())
+            if any(k in keys_joined for k in ("best", "opr", "rank", "percentile")):
+                return parsed
+
+    # 2) Scan for any div-based grids site-wide and pick best candidate
+    div_candidates = []
+    for div in soup.find_all("div"):
+        classes = div.get("class") or []
+        if any("table" in cls or "table" == cls for cls in classes):
+            parsed = parse_div_grid(div)
+            if parsed:
+                div_candidates.append(parsed)
+
+    # prefer a div candidate that has keyword rows
+    for parsed in div_candidates:
+        keys_joined = " ".join(k.lower() for k in parsed.get("rows", {}).keys())
+        if any(k in keys_joined for k in ("best", "opr", "rank", "percentile")):
+            return parsed
+    if div_candidates:
+        return div_candidates[0]
+
+    # 3) Classic <table> scanning (original logic)
+    table_candidates = []
+    # Tables whose headers mention Total NP / Best OPR / Rank
+    for t in soup.find_all("table"):
+        th_texts = [th.get_text(strip=True) for th in t.find_all("th")]
+        joined = " ".join(th_texts).lower()
+        if any(k in joined for k in ("total np", "best opr", "rank / percentile", "total np")):
+            if t not in table_candidates:
+                table_candidates.append(t)
+    # add any remaining tables
+    for t in soup.find_all("table"):
+        if t not in table_candidates:
+            table_candidates.append(t)
+
+    parsed_result = None
+    for t in table_candidates:
+        parsed = parse_table(t)
+        keys_joined = " ".join(k.lower() for k in parsed.get("rows", {}).keys())
+        if any(k in keys_joined for k in ("best", "opr", "rank", "percentile")):
+            parsed_result = parsed
+            break
+
+    if not parsed_result and table_candidates:
+        parsed_result = parse_table(table_candidates[0])
+
+    return parsed_result
 
 @bot.event
 async def on_ready():
@@ -142,69 +330,71 @@ async def team(ctx, team_number: int):
         if html_resp.status_code == 200:
             try:
                 soup = BeautifulSoup(html_resp.text, "html.parser")
+                parsed = parse_quick_stats_from_soup(soup)
+                if parsed:
+                    categories: List[str] = parsed.get("categories", [])
+                    rows: Dict[str, List[str]] = parsed.get("rows", {})
 
-                # Find a heading that contains "Quick Stats" then the following table
-                quick_heading = soup.find(lambda tag: tag.name in ("h1", "h2", "h3", "h4", "h5", "div", "span") and "Quick Stats" in tag.get_text())
-                table = None
-                if quick_heading:
-                    table = quick_heading.find_next("table")
-                if not table:
-                    # fallback: find any table that has header cells containing "Best OPR" or "Rank" text
-                    for t in soup.find_all("table"):
-                        th_texts = [th.get_text(strip=True) for th in t.find_all("th")]
-                        if any("Best OPR" in t for t in th_texts) or any("Rank" in t for t in th_texts) or any("Total NP" in t for t in th_texts):
-                            table = t
-                            break
+                    # Build an embed for nicer formatting
+                    embed = discord.Embed(title=f"Team {team_number} — Quick Stats")
+                    embed.description = f"{name} — {city} {state} {country}".strip()
 
-                if table:
-                    # parse headers (categories)
-                    headers = [th.get_text(strip=True) for th in table.find_all("th")]
-                    # parse rows
-                    rows = []
-                    for tr in table.find_all("tr"):
-                        cols = [td.get_text(" ", strip=True) for td in tr.find_all(["td", "th"]) ]
-                        if cols:
-                            rows.append(cols)
+                    # Build fields for the specific rows we care about: Best OPR and Rank / Percentile
+                    def find_row(keys):
+                        for k in rows.keys():
+                            kl = k.lower()
+                            if any(x in kl for x in keys):
+                                return k
+                        return None
 
-                    # Build a readable quick-stats block if rows look reasonable
-                    if headers and rows:
-                        # find index rows for "Best OPR" and "Rank / Percentile" (match approximate)
-                        stat_lines = []
-                        # Attempt to map columns by header positions (skip first header if it's a row label)
-                        # If the first header is blank or looks like a label, treat subsequent headers as categories
-                        if len(headers) > 1 and (headers[0].lower().startswith("best") or headers[0].strip() == ""):
-                            categories = headers[1:]
-                        else:
-                            categories = headers
+                    best_label = find_row(("best", "opr"))
+                    rank_label = find_row(("rank", "percentile"))
 
-                        # find meaningful rows by label
-                        for r in rows:
-                            label = r[0].strip() if r else ""
-                            if any(k in label for k in ("Best OPR", "Best OPR".lower(), "Best")):
-                                # values are remaining columns
-                                vals = r[1:] if len(r) > 1 else []
-                                items = []
-                                for cat, val in zip(categories, vals):
-                                    items.append(f"{cat}: {val}")
-                                stat_lines.append(" | ".join(items))
-                            if any(k in label for k in ("Rank", "Percentile", "Rank / Percentile")) or "percentile" in label.lower():
-                                vals = r[1:] if len(r) > 1 else []
-                                items = []
-                                for cat, val in zip(categories, vals):
-                                    items.append(f"{cat}: {val}")
-                                stat_lines.append(" | ".join(items))
+                    # Prefer to display per-category columns (Total NP, Auto, Teleop, Endgame)
+                    added_any = False
+                    if categories:
+                        for i, cat in enumerate(categories):
+                            best_val = ""
+                            rank_val = ""
+                            if best_label:
+                                vals = rows.get(best_label, [])
+                                if i < len(vals):
+                                    best_val = vals[i]
+                            if rank_label:
+                                vals = rows.get(rank_label, [])
+                                if i < len(vals):
+                                    rank_val = vals[i]
 
-                        if stat_lines:
-                            msg_lines.append("Quick Stats:")
-                            msg_lines.extend(stat_lines)
+                            field_lines = []
+                            if best_label and best_val:
+                                field_lines.append(f"Best OPR: {best_val}")
+                            if rank_label and rank_val:
+                                field_lines.append(f"Rank / Percentile: {rank_val}")
+
+                            if field_lines:
+                                embed.add_field(name=cat, value="\n".join(field_lines), inline=True)
+                                added_any = True
+
+                    # Fallback: if nothing added, show rows as separate fields
+                    if not added_any:
+                        for label, vals in rows.items():
+                            parts = []
+                            for i, cat in enumerate(categories):
+                                v = vals[i] if i < len(vals) else ""
+                                parts.append(f"{cat}: {v}")
+                            embed.add_field(name=label, value=" | ".join(parts), inline=False)
+
+                    await ctx.send(content=None, embed=embed)
+                    return
             except Exception:
-                # parsing error — ignore and continue
+                # parsing error — ignore and continue to fallback
                 pass
         else:
             msg_lines.append(f"(Could not fetch team page: HTTP {html_resp.status_code})")
     except requests.RequestException:
         msg_lines.append("(Failed to fetch team page)")
 
+    # Fallback: send basic text message if embed not produced
     await ctx.send("\n".join(msg_lines)[:1900])
 
 
