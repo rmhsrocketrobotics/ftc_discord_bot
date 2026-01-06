@@ -1,4 +1,4 @@
-# Minimal Discord Bot
+# FTC Discord Bot
 
 This folder contains a minimal Discord bot using discord.py.
 
@@ -31,3 +31,4 @@ python bot.py
 Notes
 - Never commit your real token. Use `.env` and keep it out of version control.
 - This is a minimal starting point. Consider adding commands, error handling, logging, and tests.
+
