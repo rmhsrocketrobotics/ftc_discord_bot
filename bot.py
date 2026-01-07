@@ -3,13 +3,17 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 import requests
+import time
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from datetime import datetime
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 from typing import Optional, Dict, List
 from flask import Flask
-import os
 import asyncio
+import threading
 
+# Flask health endpoint (kept for Render/hosting readiness)
 app = Flask(__name__)
 port = int(os.environ.get("PORT", 4000))
 
@@ -17,8 +21,12 @@ port = int(os.environ.get("PORT", 4000))
 def hello_world():
     return "Hello World!"
 
+# Load secrets from .env when running locally
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
+TOA_KEY = os.getenv("TOA_KEY")  # optional
+TOA_API_BASE = "https://theorangealliance.org/api"
+
 if not TOKEN:
     raise SystemExit("DISCORD_TOKEN not set. See README.md and .env.example")
 
@@ -30,26 +38,113 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # Simple FTC Scout API client
 API_BASE = "https://api.ftcscout.org/rest/v1"
 
+# Shared requests session with retry/backoff and Retry-After support to handle rate limits
+SESSION = requests.Session()
+retry_strategy = Retry(
+    total=5,
+    backoff_factor=1,
+    status_forcelist=(429, 500, 502, 503, 504),
+    allowed_methods=frozenset(["GET", "POST"]),
+    respect_retry_after_header=True,
+)
+adapter = HTTPAdapter(max_retries=retry_strategy)
+SESSION.mount("https://", adapter)
+SESSION.mount("http://", adapter)
 
-def api_get(path: str, params: dict | None = None):
-    """GET helper for the FTC Scout REST API. Returns (json, error_message).
-    On success returns (data, None). On failure returns (None, message).
+# Simple in-memory TTL cache: key -> (expiry_epoch, value)
+CACHE: Dict[str, object] = {}
+
+def cache_get(key: str):
+    entry = CACHE.get(key)
+    if not entry:
+        return None
+    expiry, value = entry
+    if time.time() > expiry:
+        CACHE.pop(key, None)
+        return None
+    return value
+
+def cache_set(key: str, value: object, ttl: int = 60):
+    CACHE[key] = (time.time() + ttl, value)
+
+
+def api_get(path: str, params: dict | None = None, ttl: int = 60):
+    """GET JSON from the FTC Scout REST API with caching and basic Retry-After handling.
+    Returns (data, error) where error is None on success.
     """
     url = API_BASE + path
+    key = f"api:{url}:{params}"
+    cached = cache_get(key)
+    if cached is not None:
+        return cached, None
+
     try:
-        resp = requests.get(url, params=params, timeout=10)
+        resp = SESSION.get(url, params=params, timeout=10)
     except requests.RequestException as e:
         return None, f"Request failed: {e}"
 
-    if resp.status_code == 200:
+    if resp.status_code == 429:
+        ra = resp.headers.get("Retry-After")
         try:
-            return resp.json(), None
-        except ValueError:
-            return None, "Invalid JSON response"
-    elif resp.status_code == 404:
-        return None, "Not found (404)"
-    else:
-        return None, f"API error {resp.status_code}: {resp.text}"
+            wait = int(float(ra)) if ra else 5
+        except Exception:
+            wait = 5
+        time.sleep(wait)
+        try:
+            resp = SESSION.get(url, params=params, timeout=10)
+        except requests.RequestException as e:
+            return None, f"Request failed after retry: {e}"
+
+    if resp.status_code != 200:
+        return None, f"HTTP {resp.status_code}"
+
+    try:
+        data = resp.json()
+    except Exception as e:
+        return None, f"Invalid JSON: {e}"
+
+    cache_set(key, data, ttl=ttl)
+    return data, None
+
+
+def toa_get(path: str, params: dict | None = None, ttl: int = 60):
+    """GET JSON from The Orange Alliance API (if TOA_KEY present). Returns (data, error)."""
+    if not TOA_KEY:
+        return None, "TOA key not configured"
+    url = TOA_API_BASE + path
+    key = f"toa:{url}:{params}"
+    cached = cache_get(key)
+    if cached is not None:
+        return cached, None
+
+    headers = {"X-TOA-Key": TOA_KEY}
+    try:
+        resp = SESSION.get(url, params=params, headers=headers, timeout=10)
+    except requests.RequestException as e:
+        return None, f"TOA request failed: {e}"
+
+    if resp.status_code == 429:
+        ra = resp.headers.get("Retry-After")
+        try:
+            wait = int(float(ra)) if ra else 5
+        except Exception:
+            wait = 5
+        time.sleep(wait)
+        try:
+            resp = SESSION.get(url, params=params, headers=headers, timeout=10)
+        except requests.RequestException as e:
+            return None, f"TOA request failed after retry: {e}"
+
+    if resp.status_code != 200:
+        return None, f"TOA HTTP {resp.status_code}"
+
+    try:
+        data = resp.json()
+    except Exception as e:
+        return None, f"TOA invalid JSON: {e}"
+
+    cache_set(key, data, ttl=ttl)
+    return data, None
 
 
 def parse_quick_stats_from_soup(soup: BeautifulSoup) -> Optional[Dict]:
@@ -57,7 +152,7 @@ def parse_quick_stats_from_soup(soup: BeautifulSoup) -> Optional[Dict]:
     Returns a dict with keys: 'categories': List[str], 'rows': Dict[label, List[str]]
     or None if no suitable table found.
     """
-    from bs4 import Tag
+
 
     # Helper to parse classic <table> elements
     def parse_table(t):
@@ -336,7 +431,7 @@ async def team(ctx, team_number: int):
     # Try to fetch the public HTML team page and parse the Quick Stats table
     html_url = f"https://ftcscout.org/teams/{team_number}"
     try:
-        html_resp = requests.get(html_url, timeout=10)
+        html_resp = SESSION.get(html_url, timeout=10)
         if html_resp.status_code == 200:
             try:
                 soup = BeautifulSoup(html_resp.text, "html.parser")

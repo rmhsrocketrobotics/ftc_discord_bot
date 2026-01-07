@@ -3,7 +3,7 @@
 This folder contains a minimal Discord bot using discord.py.
 
 Files:
-- `bot.py` — Discord bot code.
+- `bot.py` — minimal bot that responds to `!ping`, `!echo`, and replies to `hello`.
 - `requirements.txt` — dependencies.
 - `.env.example` — example environment file (do NOT commit your real token).
 
@@ -31,4 +31,3 @@ python bot.py
 Notes
 - Never commit your real token. Use `.env` and keep it out of version control.
 - This is a minimal starting point. Consider adding commands, error handling, logging, and tests.
-
