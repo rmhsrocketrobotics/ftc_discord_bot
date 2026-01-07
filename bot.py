@@ -6,6 +6,15 @@ import requests
 from datetime import datetime
 from bs4 import BeautifulSoup
 from typing import Optional, Dict, List
+from flask import Flask
+import os
+
+app = Flask(__name__)
+port = int(os.environ.get("PORT", 4000))
+
+@app.route("/")
+def hello_world():
+    return "Hello World!"
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -441,5 +450,13 @@ async def on_message(message):
     # allow commands to be processed
     await bot.process_commands(message)
 
+import threading
+
+def run_flask():
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
+
 if __name__ == "__main__":
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
     bot.run(TOKEN)
