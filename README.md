@@ -14,7 +14,6 @@ A lightweight Discord bot that fetches FTC event and team data (from the FTC Sco
 - Install dependencies:
 
 ```powershell
-cd "C:\Users\krisi\OneDrive\Desktop\Coding\discord-bot"
 python -m pip install -r requirements.txt
 ```
 
@@ -38,7 +37,6 @@ Make sure `discord-bot/.env` is listed in `.gitignore` (it is by default).
 ## Run locally
 
 ```powershell
-cd "C:\Users\krisi\OneDrive\Desktop\Coding\discord-bot"
 python bot.py
 ```
 
@@ -113,3 +111,4 @@ python bot.py
 Notes
 - Never commit your real token. Use `.env` and keep it out of version control.
 - This is a minimal starting point. Consider adding commands, error handling, logging, and tests.
+
