@@ -24,11 +24,11 @@ def hello_world():
 # Load secrets from .env when running locally
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
-TOA_KEY = os.getenv("TOA_KEY")  # optional
+TOA_KEY = os.getenv("TOA_KEY") 
 TOA_API_BASE = "https://theorangealliance.org/api"
 
 if not TOKEN:
-    raise SystemExit("DISCORD_TOKEN not set. See README.md and .env.example")
+    raise SystemExit("DISCORD_TOKEN not set.")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -152,7 +152,6 @@ def parse_quick_stats_from_soup(soup: BeautifulSoup) -> Optional[Dict]:
     Returns a dict with keys: 'categories': List[str], 'rows': Dict[label, List[str]]
     or None if no suitable table found.
     """
-
 
     # Helper to parse classic <table> elements
     def parse_table(t):
@@ -339,14 +338,19 @@ async def on_ready():
 
 @bot.command(name="events")
 async def events(ctx, *, query: str = None):
-    """Search events. Usage: `!events <search text>` (returns up to 8 results)."""
+    """Search for events. Usage: `!events [search]` — e.g., `!events michigan`"""
     params = {"limit": 8}
     if query:
         params["searchText"] = query
 
     data, err = api_get("/events/search", params=params)
     if err:
-        await ctx.send(f"Error: {err}")
+        await ctx.send(
+            f"⚠️ **Event search temporarily unavailable**\n"
+            f"The FTC Scout event endpoints are currently down.\n"
+            f"You can still use `!team <team_number>` to get team stats.\n"
+            f"Error: {err}"
+        )
         return
 
     if not data:
@@ -366,14 +370,19 @@ async def events(ctx, *, query: str = None):
 
 @bot.command(name="event")
 async def event(ctx, code: str, season: int | None = None):
-    """Get event details. Usage: `!event <code> [season]` (season defaults to current year)."""
+    """Get event details. Usage: `!event <code> [season]` — e.g., `!event USCMIW` or `!event USCMIW 2025`"""
     if season is None:
         season = datetime.now().year
 
     path = f"/events/{season}/{code}"
     data, err = api_get(path)
     if err:
-        await ctx.send(f"Error: {err}")
+        await ctx.send(
+            f"⚠️ **Event lookup temporarily unavailable**\n"
+            f"The FTC Scout event endpoints are currently down.\n"
+            f"You can still use `!team <team_number>` to get team stats.\n"
+            f"Error: {err}"
+        )
         return
 
     # Format basic event information
@@ -389,33 +398,18 @@ async def event(ctx, code: str, season: int | None = None):
 
 @bot.command(name="teams")
 async def teams(ctx, event_code: str, season: int | None = None):
-    """List teams at an event. Usage: `!teams <event_code> [season]`"""
-    if season is None:
-        season = datetime.now().year
-
-    path = f"/events/{season}/{event_code}/teams"
-    data, err = api_get(path)
-    if err:
-        await ctx.send(f"Error: {err}")
-        return
-
-    if not data:
-        await ctx.send("No teams found for that event.")
-        return
-
-    lines = []
-    for te in data[:40]:
-        num = te.get("teamNumber") or te.get("teamNumber")
-        nick = te.get("teamNickname") or te.get("nickname") or ""
-        place = te.get("city") or te.get("state") or ""
-        lines.append(f"#{num} — {nick} {place}")
-
-    await ctx.send("\n".join(lines)[:1900])
+    """List teams at an event."""
+    await ctx.send(
+        "⚠️ **Team lookup by event temporarily unavailable**\n"
+        "The FTC Scout event endpoints are currently down.\n"
+        "You can still use `!team <team_number>` to get individual team stats.\n"
+        "We'll re-enable `!teams` when FTC Scout restores service."
+    )
 
 
 @bot.command(name="team")
 async def team(ctx, team_number: int):
-    """Get basic team info. Usage: `!team <team_number>`"""
+    """Get basic team info and Quick Stats. Usage: `!team <team_number>` — e.g., `!team 22565`"""
     path = f"/teams/{team_number}"
     data, err = api_get(path)
     if err:
@@ -503,10 +497,209 @@ async def team(ctx, team_number: int):
     await ctx.send("\n".join(msg_lines)[:1900])
 
 
+@bot.command(name="team-events")
+async def team_events(ctx, team_number: int, season: int | None = None):
+    """Get all event participations for a team in a season. Usage: `!team-events <team_number> [season]`"""
+    if season is None:
+        season = datetime.now().year
+    
+    path = f"/teams/{team_number}/events/{season}"
+    data, err = api_get(path)
+    if err:
+        await ctx.send(
+            f"⚠️ **Event lookup temporarily unavailable**\n"
+            f"The FTC Scout event endpoints are currently down.\n"
+            f"Error: {err}"
+        )
+        return
+    
+    if not data:
+        await ctx.send(f"No event participations found for team {team_number} in season {season}.")
+        return
+    
+    lines = [f"**Team {team_number} — Events ({season})**\n"]
+    for event in data[:20]:
+        event_code = event.get("eventCode", "?")
+        event_name = event.get("eventName", "?")
+        lines.append(f"{event_code} — {event_name}")
+    
+    await ctx.send("\n".join(lines)[:1900])
+
+
+@bot.command(name="team-awards")
+async def team_awards(ctx, team_number: int, season: int | None = None, event_code: str | None = None):
+    """Get awards for a team (optionally filtered by season or event). Usage: `!team-awards <team_number> [season] [event_code]`"""
+    params = {}
+    if season:
+        params["season"] = season
+    if event_code:
+        params["eventCode"] = event_code
+    
+    path = f"/teams/{team_number}/awards"
+    data, err = api_get(path, params=params)
+    if err:
+        await ctx.send(f"Error: {err}")
+        return
+    
+    if not data:
+        await ctx.send(f"No awards found for team {team_number}.")
+        return
+    
+    filters = []
+    if season:
+        filters.append(f"season {season}")
+    if event_code:
+        filters.append(f"event {event_code}")
+    filter_str = f" ({', '.join(filters)})" if filters else ""
+    
+    lines = [f"**Team {team_number} — Awards{filter_str}**\n"]
+    for award in data[:20]:
+        # Award name is in 'type' field
+        award_name = award.get("type", "?")
+        season_val = award.get("season", "?")
+        event = award.get("eventCode", "?")
+        placement = award.get("placement", "?")
+        
+        # Convert placement number to ordinal (1st, 2nd, 3rd, etc.)
+        if placement and isinstance(placement, int):
+            if placement % 100 in (11, 12, 13):
+                ordinal = f"{placement}th"
+            elif placement % 10 == 1:
+                ordinal = f"{placement}st"
+            elif placement % 10 == 2:
+                ordinal = f"{placement}nd"
+            elif placement % 10 == 3:
+                ordinal = f"{placement}rd"
+            else:
+                ordinal = f"{placement}th"
+        else:
+            ordinal = str(placement)
+        
+        lines.append(f"{award_name} — {ordinal} Place ({event}, {season_val})")
+    
+    await ctx.send("\n".join(lines)[:1900])
+
+
+@bot.command(name="team-matches")
+async def team_matches(ctx, team_number: int, season: int | None = None, event_code: str | None = None):
+    """Get matches for a team (optionally filtered by season or event). Usage: `!team-matches <team_number> [season] [event_code]`"""
+    params = {}
+    if season:
+        params["season"] = season
+    if event_code:
+        params["eventCode"] = event_code
+    
+    path = f"/teams/{team_number}/matches"
+    data, err = api_get(path, params=params)
+    if err:
+        await ctx.send(f"Error: {err}")
+        return
+    
+    if not data:
+        await ctx.send(f"No matches found for team {team_number}.")
+        return
+    
+    filters = []
+    if season:
+        filters.append(f"season {season}")
+    if event_code:
+        filters.append(f"event {event_code}")
+    filter_str = f" ({', '.join(filters)})" if filters else ""
+    
+    lines = [f"**Team {team_number} — Matches{filter_str}**\n"]
+    for match in data[:15]:
+        match_num = match.get("matchNumber", "?")
+        event = match.get("eventCode", "?")
+        result = match.get("result", "?")
+        lines.append(f"Match {match_num} ({event}): {result}")
+    
+    await ctx.send("\n".join(lines)[:1900])
+
+
+@bot.command(name="team-stats")
+async def team_stats(ctx, team_number: int, season: int | None = None, region: str | None = None):
+    """Get quick stats for a team in a season/region. Usage: `!team-stats <team_number> [season] [region]`"""
+    if season is None:
+        season = datetime.now().year
+    
+    params = {"season": season}
+    if region:
+        params["region"] = region
+    
+    path = f"/teams/{team_number}/quick-stats"
+    data, err = api_get(path, params=params)
+    if err:
+        await ctx.send(f"Error: {err}")
+        return
+    
+    region_str = f" ({region})" if region else " (World)"
+    embed = discord.Embed(
+        title=f"Team {team_number} — Quick Stats {season}{region_str}",
+        description="Statistics aggregated from all team matches this season."
+    )
+    
+    # Add key stats as fields
+    stats_to_show = [
+        ("Ranking", "ranking"),
+        ("Wins", "wins"),
+        ("Losses", "losses"),
+        ("Ties", "ties"),
+        ("Avg OPR", "avgOpr"),
+        ("Avg RP1", "avgRp1"),
+        ("Avg RP2", "avgRp2"),
+    ]
+    
+    for label, key in stats_to_show:
+        value = data.get(key)
+        if value is not None:
+            embed.add_field(name=label, value=str(value), inline=True)
+    
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="teams-search")
+async def teams_search(ctx, search_text: str | None = None, region: str | None = None, limit: int | None = None):
+    """Search for teams. Usage: `!teams-search [search_text] [region] [limit]`"""
+    params = {}
+    if search_text:
+        params["searchText"] = search_text
+    if region:
+        params["region"] = region
+    if limit:
+        params["limit"] = min(limit, 100)
+    else:
+        params["limit"] = 20
+    
+    path = "/teams/search"
+    data, err = api_get(path, params=params)
+    if err:
+        await ctx.send(f"Error: {err}")
+        return
+    
+    if not data:
+        await ctx.send("No teams found.")
+        return
+    
+    title = "Teams"
+    if search_text:
+        title += f" matching '{search_text}'"
+    if region:
+        title += f" in {region}"
+    
+    lines = [f"**{title}**\n"]
+    for team in data:
+        team_num = team.get("teamNumber")
+        team_name = team.get("teamNickname", "")
+        location = team.get("city", "")
+        state = team.get("stateProv", "")
+        lines.append(f"#{team_num} — {team_name} ({location} {state})".strip())
+    
+    await ctx.send("\n".join(lines)[:1900])
+
+
 @bot.command(name="commands")
 async def commands_list(ctx):
     """List all available bot commands with usage and short descriptions."""
-    # Determine prefix (commands.Bot can accept a str or callable; we assume the common string prefix)
     prefix = "!"
     try:
         if isinstance(bot.command_prefix, str):
@@ -525,7 +718,7 @@ async def commands_list(ctx):
         desc = c.help or "No description available."
         # Collapse newlines in description
         desc = " ".join(line.strip() for line in desc.splitlines())
-        lines.append(f"{usage} — {desc}")
+        lines.append(f"**{usage}** — {desc}")
 
     if not lines:
         await ctx.send("No commands available.")
